@@ -15,6 +15,10 @@ def fetch_dataset_with_duckdb(max_rows=None, min_date=None, max_date=None, selec
     try:
         con = duckdb.connect()
         
+        # Install and load httpfs extension for remote file access
+        con.execute("INSTALL httpfs;")
+        con.execute("LOAD httpfs;")
+        
         # Build the query with filters
         query = f"""
         SELECT *
@@ -179,6 +183,10 @@ def get_available_sources(max_rows=1000):
     """Get list of available sources for the filter using DuckDB"""
     try:
         con = duckdb.connect()
+        
+        # Install and load httpfs extension for remote file access
+        con.execute("INSTALL httpfs;")
+        con.execute("LOAD httpfs;")
         
         # Query to get distinct sources
         query = f"""
