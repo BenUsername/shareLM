@@ -63,11 +63,8 @@ def fetch_dataset_with_duckdb(max_rows=None, min_date=None, max_date=None, selec
         WHERE 1=1
         """
         
-        # Add date filters if provided
-        if min_date:
-            query += f" AND CAST(timestamp AS DATE) >= CAST('{min_date}' AS DATE)"
-        if max_date:
-            query += f" AND CAST(timestamp AS DATE) <= CAST('{max_date}' AS DATE)"
+        # Note: Date filtering will be done in Python after we see the actual column names
+        # This avoids SQL errors if the timestamp column has a different name
         
         # Add source filter if provided
         if selected_sources and len(selected_sources) > 0:
@@ -99,12 +96,13 @@ def fetch_dataset_sample(max_rows=500):
 def process_data(max_rows, min_date, max_date, selected_sources):
     """Process dataset and return charts with filters using DuckDB"""
     try:
-        rows = fetch_dataset_with_duckdb(max_rows=max_rows, min_date=min_date, max_date=max_date, selected_sources=selected_sources)
+        # Fetch data (source filter is done in SQL, date filter in Python)
+        rows = fetch_dataset_with_duckdb(max_rows=max_rows, min_date=None, max_date=None, selected_sources=selected_sources)
         
         if not rows:
             return None, None, "No data fetched. Please try again."
         
-        # Parse dates if provided
+        # Parse date filters
         min_date_obj = None
         max_date_obj = None
         if min_date:
@@ -118,41 +116,52 @@ def process_data(max_rows, min_date, max_date, selected_sources):
             except:
                 pass
         
-        # Get all unique sources first
-        all_sources = set()
-        for row in rows:
-            row_data = row.get('row', row) if isinstance(row, dict) else row
-            source = row_data.get('source', 'unknown')
-            all_sources.add(source)
-        
-        # If no sources selected, use all sources
-        if not selected_sources or len(selected_sources) == 0:
-            selected_sources = list(all_sources)
-        
         source_counts = defaultdict(int)
         time_series = defaultdict(int)
         filtered_count = 0
         
+        # Find the timestamp field name by checking first row
+        timestamp_field = None
+        if rows:
+            first_row_data = rows[0].get('row', rows[0]) if isinstance(rows[0], dict) else rows[0]
+            timestamp_fields = ['timestamp', 'date', 'created_at', 'time', 'created']
+            for field in timestamp_fields:
+                if field in first_row_data:
+                    timestamp_field = field
+                    break
+        
         for row in rows:
             row_data = row.get('row', row) if isinstance(row, dict) else row
             
-            # Filter by source
+            # Filter by source (already done in SQL, but double-check)
             source = row_data.get('source', 'unknown')
-            if source not in selected_sources:
+            if selected_sources and len(selected_sources) > 0 and source not in selected_sources:
                 continue
             
-            # Filter by date
+            # Filter by date in Python
             row_date = None
-            if 'timestamp' in row_data:
+            if timestamp_field and timestamp_field in row_data and row_data[timestamp_field] is not None:
                 try:
-                    dt = datetime.fromisoformat(str(row_data['timestamp']).replace('Z', '+00:00'))
+                    timestamp_val = str(row_data[timestamp_field])
+                    # Try different date formats
+                    if 'T' in timestamp_val:
+                        # ISO format
+                        dt = datetime.fromisoformat(timestamp_val.replace('Z', '+00:00').split('.')[0])
+                    elif ' ' in timestamp_val:
+                        # Datetime string
+                        dt = datetime.strptime(timestamp_val.split('.')[0], '%Y-%m-%d %H:%M:%S')
+                    else:
+                        # Date only format
+                        dt = datetime.strptime(timestamp_val, '%Y-%m-%d')
+                    
                     row_date = dt.date()
                     
+                    # Apply date filters
                     if min_date_obj and row_date < min_date_obj:
                         continue
                     if max_date_obj and row_date > max_date_obj:
                         continue
-                except:
+                except Exception as e:
                     pass
             
             filtered_count += 1
@@ -209,7 +218,7 @@ def process_data(max_rows, min_date, max_date, selected_sources):
             fig_line = None
         
         total = sum(source_counts.values())
-        info = f"Fetched {len(rows)} rows\nFiltered to {filtered_count} rows\nTotal conversations: {total:,}\nSources: {len(source_counts)}\nTime points: {len(time_series)}"
+        info = f"Fetched {len(rows)} rows\nAfter filters: {filtered_count} rows\nTotal conversations: {total:,}\nSources: {len(source_counts)}\nTime points: {len(time_series)}"
         
         return (fig_pie, fig_line, info)
         
@@ -263,8 +272,8 @@ def create_interface():
             with gr.Column(scale=1):
                 max_rows = gr.Slider(
                     minimum=100,
-                    maximum=5000,
-                    value=500,
+                    maximum=10000,
+                    value=1000,
                     step=100,
                     label="Number of Rows to Fetch",
                     info="Maximum number of rows to fetch from the dataset"
@@ -332,7 +341,7 @@ def create_interface():
         def initial_load():
             try:
                 sources = get_available_sources(1000)
-                results = process_data(500, None, None, sources)
+                results = process_data(1000, None, None, sources)
                 return results[0], results[1], results[2], gr.CheckboxGroup(choices=sources, value=sources)
             except Exception as e:
                 return None, None, f"Error loading initial data: {str(e)}", gr.CheckboxGroup(choices=[], value=[])
