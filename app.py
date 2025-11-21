@@ -4,48 +4,61 @@ import plotly.express as px
 from datetime import datetime, date
 import requests
 from collections import defaultdict
+import duckdb
 
 HF_DATASET_API = 'https://datasets-server.huggingface.co/rows'
 DATASET_NAME = 'shachardon/ShareLM'
+HF_PARQUET_PATH = "hf://datasets/shachardon/ShareLM@~parquet/**/**/*.parquet"
+
+def fetch_dataset_with_duckdb(max_rows=None, min_date=None, max_date=None, selected_sources=None):
+    """Fetch data from HuggingFace dataset using DuckDB with hf:// protocol"""
+    try:
+        con = duckdb.connect()
+        
+        # Build the query with filters
+        query = f"""
+        SELECT *
+        FROM '{HF_PARQUET_PATH}'
+        WHERE 1=1
+        """
+        
+        # Add date filters if provided
+        if min_date:
+            query += f" AND CAST(timestamp AS DATE) >= CAST('{min_date}' AS DATE)"
+        if max_date:
+            query += f" AND CAST(timestamp AS DATE) <= CAST('{max_date}' AS DATE)"
+        
+        # Add source filter if provided
+        if selected_sources and len(selected_sources) > 0:
+            sources_str = "', '".join(selected_sources)
+            query += f" AND source IN ('{sources_str}')"
+        
+        # Add limit if specified
+        if max_rows:
+            query += f" LIMIT {max_rows}"
+        
+        # Execute query and fetch results
+        result = con.execute(query).fetchdf()
+        con.close()
+        
+        # Convert DataFrame to list of dicts (matching old format)
+        rows = []
+        for _, row in result.iterrows():
+            rows.append({'row': row.to_dict()})
+        
+        return rows
+    except Exception as e:
+        print(f"Error fetching data with DuckDB: {e}")
+        raise
 
 def fetch_dataset_sample(max_rows=500):
-    """Fetch a sample from the Hugging Face dataset"""
-    MAX_BATCH_SIZE = 100
-    batches = min((max_rows + MAX_BATCH_SIZE - 1) // MAX_BATCH_SIZE, 50)  # Increased max batches
-    all_rows = []
-    
-    for i in range(batches):
-        offset = i * MAX_BATCH_SIZE
-        length = min(MAX_BATCH_SIZE, max_rows - offset)
-        
-        if length <= 0:
-            break
-        
-        url = f"{HF_DATASET_API}?dataset={DATASET_NAME.replace('/', '%2F')}&config=default&split=train&offset={offset}&length={length}"
-        
-        try:
-            response = requests.get(url, headers={'Accept': 'application/json'}, timeout=30)
-            response.raise_for_status()
-            data = response.json()
-            
-            if data.get('rows') and isinstance(data['rows'], list):
-                all_rows.extend(data['rows'])
-            
-            # Small delay to avoid rate limiting
-            if i < batches - 1:
-                import time
-                time.sleep(0.1)
-        except Exception as e:
-            print(f"Error fetching batch {i}: {e}")
-            if i == 0:
-                raise
-    
-    return all_rows
+    """Fetch a sample from the Hugging Face dataset using DuckDB"""
+    return fetch_dataset_with_duckdb(max_rows=max_rows)
 
 def process_data(max_rows, min_date, max_date, selected_sources):
-    """Process dataset and return charts with filters"""
+    """Process dataset and return charts with filters using DuckDB"""
     try:
-        rows = fetch_dataset_sample(max_rows)
+        rows = fetch_dataset_with_duckdb(max_rows=max_rows, min_date=min_date, max_date=max_date, selected_sources=selected_sources)
         
         if not rows:
             return None, None, "No data fetched. Please try again."
@@ -163,16 +176,24 @@ def process_data(max_rows, min_date, max_date, selected_sources):
         return (None, None, f"Error: {str(e)}")
 
 def get_available_sources(max_rows=1000):
-    """Get list of available sources for the filter"""
+    """Get list of available sources for the filter using DuckDB"""
     try:
-        rows = fetch_dataset_sample(max_rows)
-        sources = set()
-        for row in rows:
-            row_data = row.get('row', row) if isinstance(row, dict) else row
-            source = row_data.get('source', 'unknown')
-            sources.add(source)
-        return sorted(list(sources))
-    except:
+        con = duckdb.connect()
+        
+        # Query to get distinct sources
+        query = f"""
+        SELECT DISTINCT source
+        FROM '{HF_PARQUET_PATH}'
+        ORDER BY source
+        """
+        
+        result = con.execute(query).fetchdf()
+        con.close()
+        
+        sources = result['source'].tolist() if not result.empty else []
+        return sources
+    except Exception as e:
+        print(f"Error getting sources with DuckDB: {e}")
         return []
 
 def create_interface():
