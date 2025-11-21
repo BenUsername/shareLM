@@ -10,32 +10,53 @@ let cachedStats: {
 const CACHE_TTL = 60 * 60 * 1000; // 1 hour in milliseconds
 
 // Hugging Face API endpoint for dataset
-const HF_DATASET_API = 'https://datasets-server.huggingface.co/parquet';
+const HF_DATASET_API = 'https://datasets-server.huggingface.co/rows';
 
-async function fetchDatasetSample(maxRows: number = 50000) {
+async function fetchDatasetSample(maxRows: number = 500) {
   // Use Hugging Face Datasets Server API to get a sample
-  // For large datasets, we'll process a sample to avoid timeout
-  const url = `${HF_DATASET_API}?dataset=shachardon%2FShareLM&config=default&split=train&offset=0&length=${maxRows}`;
+  // API limits length to 100 rows per request, so we fetch in batches
+  const MAX_BATCH_SIZE = 100;
+  const batches = Math.min(Math.ceil(maxRows / MAX_BATCH_SIZE), 10); // Limit to 10 batches (1000 rows max)
+  const allRows: any[] = [];
   
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 25000); // 25 second timeout
+    for (let i = 0; i < batches; i++) {
+      const offset = i * MAX_BATCH_SIZE;
+      const length = Math.min(MAX_BATCH_SIZE, maxRows - offset);
+      
+      if (length <= 0) break;
+      
+      const url = `${HF_DATASET_API}?dataset=shachardon%2FShareLM&config=default&split=train&offset=${offset}&length=${length}`;
+      
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 25000); // 25 second timeout
 
-    const response = await fetch(url, {
-      headers: {
-        'Accept': 'application/json',
-      },
-      signal: controller.signal,
-    });
+      const response = await fetch(url, {
+        headers: {
+          'Accept': 'application/json',
+        },
+        signal: controller.signal,
+      });
 
-    clearTimeout(timeoutId);
+      clearTimeout(timeoutId);
 
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`HTTP error! status: ${response.status}, message: ${errorText}`);
+      }
+
+      const data = await response.json();
+      if (data.rows && Array.isArray(data.rows)) {
+        allRows.push(...data.rows);
+      }
+      
+      // Small delay between requests to avoid rate limiting
+      if (i < batches - 1) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
     }
-
-    const data = await response.json();
-    return data;
+    
+    return { rows: allRows };
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
       throw new Error('Request timeout - dataset is too large to process in time limit');
@@ -57,17 +78,21 @@ export async function GET() {
     }
 
     // Fetch dataset sample from Hugging Face API
-    // Start with smaller sample to avoid timeout
+    // Start with smaller sample to avoid timeout and API limits
     let datasetData;
-    let maxRows = 10000;
+    let maxRows = 500; // Will fetch 5 batches of 100 rows
     
     try {
       datasetData = await fetchDatasetSample(maxRows);
     } catch (error) {
-      // If timeout, try with even smaller sample
-      if (error instanceof Error && error.message.includes('timeout')) {
-        maxRows = 5000;
-        datasetData = await fetchDatasetSample(maxRows);
+      // If error, try with even smaller sample
+      if (error instanceof Error) {
+        if (error.message.includes('timeout') || error.message.includes('422')) {
+          maxRows = 200; // 2 batches of 100 rows
+          datasetData = await fetchDatasetSample(maxRows);
+        } else {
+          throw error;
+        }
       } else {
         throw error;
       }
