@@ -8,36 +8,60 @@ let cachedBreakdown: {
 
 const CACHE_TTL = 60 * 60 * 1000; // 1 hour
 
-const HF_DATASET_API = 'https://datasets-server.huggingface.co/parquet';
+const HF_DATASET_API = 'https://datasets-server.huggingface.co/rows';
+const BATCH_SIZE = 100; // Process 100 rows at a time
+const MAX_BATCHES = 50; // Limit to 5000 rows total to avoid overwhelming the server
 
-async function fetchDatasetSample(maxRows: number = 50000) {
-  const url = `${HF_DATASET_API}?dataset=shachardon%2FShareLM&config=default&split=train&offset=0&length=${maxRows}`;
+async function* fetchDatasetStream() {
+  let offset = 0;
+  let batchCount = 0;
   
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 25000); // 25 second timeout
+  while (batchCount < MAX_BATCHES) {
+    const url = `${HF_DATASET_API}?dataset=shachardon%2FShareLM&config=default&split=train&offset=${offset}&length=${BATCH_SIZE}`;
+    
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second timeout per batch
 
-    const response = await fetch(url, {
-      headers: {
-        'Accept': 'application/json',
-      },
-      signal: controller.signal,
-    });
+      const response = await fetch(url, {
+        headers: {
+          'Accept': 'application/json',
+        },
+        signal: controller.signal,
+      });
 
-    clearTimeout(timeoutId);
+      clearTimeout(timeoutId);
 
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
+      if (!response.ok) {
+        if (response.status === 422) {
+          // No more data available
+          break;
+        }
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const data = await response.json();
+      
+      if (!data.rows || data.rows.length === 0) {
+        // No more rows
+        break;
+      }
+
+      yield data.rows;
+      
+      offset += BATCH_SIZE;
+      batchCount++;
+      
+      // Small delay between requests to avoid rate limiting
+      await new Promise(resolve => setTimeout(resolve, 200));
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        console.warn(`Batch timeout at offset ${offset}, stopping stream`);
+        break;
+      }
+      console.error('Error fetching batch:', error);
+      throw error;
     }
-
-    const data = await response.json();
-    return data;
-  } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error('Request timeout - dataset is too large to process in time limit');
-    }
-    console.error('Error fetching from HF API:', error);
-    throw error;
   }
 }
 
@@ -51,49 +75,25 @@ export async function GET() {
       });
     }
 
-    // Fetch dataset sample - start with smaller sample
-    let datasetData;
-    let maxRows = 10000;
-    
-    try {
-      datasetData = await fetchDatasetSample(maxRows);
-    } catch (error) {
-      // If timeout, try with even smaller sample
-      if (error instanceof Error && error.message.includes('timeout')) {
-        maxRows = 5000;
-        datasetData = await fetchDatasetSample(maxRows);
-      } else {
-        throw error;
-      }
-    }
-    
     const sourceCounts: Record<string, number> = {};
-    
-    // Handle different response formats
-    let rows: any[] = [];
-    if (datasetData.rows) {
-      rows = datasetData.rows;
-    } else if (Array.isArray(datasetData)) {
-      rows = datasetData;
-    } else if (datasetData.data) {
-      rows = datasetData.data;
-    }
-    
     let processedCount = 0;
 
-    for (const row of rows) {
-      processedCount++;
-      
-      // Get row data - handle different formats
-      let rowData: any = {};
-      if (row.row) {
-        rowData = row.row;
-      } else if (typeof row === 'object') {
-        rowData = row;
+    // Stream and process data in batches
+    for await (const batch of fetchDatasetStream()) {
+      for (const row of batch) {
+        processedCount++;
+        
+        // Get row data - handle different formats
+        let rowData: any = {};
+        if (row.row) {
+          rowData = row.row;
+        } else if (typeof row === 'object') {
+          rowData = row;
+        }
+        
+        const source = rowData.source || 'unknown';
+        sourceCounts[source] = (sourceCounts[source] || 0) + 1;
       }
-      
-      const source = rowData.source || 'unknown';
-      sourceCounts[source] = (sourceCounts[source] || 0) + 1;
     }
 
     // Convert to array format for chart

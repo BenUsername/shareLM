@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Charts } from '@/components/Charts';
+import { SourceDoughnutChart } from '@/components/Charts';
 import styles from './page.module.css';
 
 interface SourceData {
@@ -9,16 +9,11 @@ interface SourceData {
   value: number;
 }
 
-interface TimeSeriesData {
-  date: string;
-  count: number;
-}
-
 export default function Home() {
   const [sourceData, setSourceData] = useState<SourceData[]>([]);
-  const [timeSeriesData, setTimeSeriesData] = useState<TimeSeriesData[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [processedCount, setProcessedCount] = useState<number>(0);
 
   useEffect(() => {
     async function fetchData() {
@@ -26,8 +21,8 @@ export default function Home() {
         setLoading(true);
         setError(null);
 
-        // Fetch stats from API
-        const response = await fetch('/api/stats');
+        // Fetch source breakdown from API
+        const response = await fetch('/api/source-breakdown');
         
         if (!response.ok) {
           throw new Error(`Failed to fetch data: ${response.statusText}`);
@@ -39,20 +34,14 @@ export default function Home() {
           throw new Error(data.error);
         }
 
-        // Format source breakdown data
-        const sourceBreakdown = Object.entries(data.sourceBreakdown || {}).map(([name, value]) => ({
-          name,
-          value: value as number,
-        })).sort((a, b) => b.value - a.value);
+        // Set source breakdown data
+        if (data.data && Array.isArray(data.data)) {
+          setSourceData(data.data);
+        }
 
-        // Format time series data
-        const timeSeries = Object.entries(data.timeSeries || {}).map(([date, count]) => ({
-          date,
-          count: count as number,
-        })).sort((a, b) => a.date.localeCompare(b.date));
-
-        setSourceData(sourceBreakdown);
-        setTimeSeriesData(timeSeries);
+        if (data.processedCount) {
+          setProcessedCount(data.processedCount);
+        }
       } catch (err) {
         console.error('Error fetching data:', err);
         setError(err instanceof Error ? err.message : 'An unknown error occurred');
@@ -68,7 +57,7 @@ export default function Home() {
     <main className={styles.mainContainer}>
       <div className={styles.header}>
         <h1>ShareLM Dataset Analysis</h1>
-        <p className={styles.subtitle}>Analyzing conversations from the ShareLM Hugging Face dataset</p>
+        <p className={styles.subtitle}>Source breakdown from the ShareLM Hugging Face dataset</p>
       </div>
 
       {error && (
@@ -78,17 +67,17 @@ export default function Home() {
         </div>
       )}
 
-      <Charts 
-        sourceData={sourceData} 
-        timeSeriesData={timeSeriesData} 
-        loading={loading} 
-      />
+      <SourceDoughnutChart data={sourceData} loading={loading} />
 
       {!loading && !error && (
         <div className={styles.statsInfo}>
           <p>Total sources: {sourceData.length}</p>
-          <p>Total time points: {timeSeriesData.length}</p>
-          <p>Total conversations analyzed: {sourceData.reduce((sum, item) => sum + item.value, 0).toLocaleString()}</p>
+          <p>Total conversations analyzed: {processedCount.toLocaleString()}</p>
+          {processedCount > 0 && (
+            <p className={styles.note}>
+              Processed {processedCount.toLocaleString()} rows using streaming import
+            </p>
+          )}
         </div>
       )}
     </main>
