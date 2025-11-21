@@ -124,11 +124,21 @@ def process_data(max_rows, min_date, max_date, selected_sources):
         timestamp_field = None
         if rows:
             first_row_data = rows[0].get('row', rows[0]) if isinstance(rows[0], dict) else rows[0]
-            timestamp_fields = ['timestamp', 'date', 'created_at', 'time', 'created']
+            # Debug: print available fields
+            print(f"Available fields in first row: {list(first_row_data.keys())}")
+            timestamp_fields = ['timestamp', 'date', 'created_at', 'time', 'created', 'ts', 'datetime']
             for field in timestamp_fields:
                 if field in first_row_data:
                     timestamp_field = field
+                    print(f"Found timestamp field: {field}")
                     break
+            if not timestamp_field:
+                # Try to find any field that looks like a date
+                for key in first_row_data.keys():
+                    if 'time' in key.lower() or 'date' in key.lower() or 'created' in key.lower():
+                        timestamp_field = key
+                        print(f"Found potential timestamp field: {key}")
+                        break
         
         for row in rows:
             row_data = row.get('row', row) if isinstance(row, dict) else row
@@ -341,10 +351,12 @@ def create_interface():
         def initial_load():
             try:
                 sources = get_available_sources(1000)
-                results = process_data(1000, None, None, sources)
-                return results[0], results[1], results[2], gr.CheckboxGroup(choices=sources, value=sources)
+                results = process_data(1000, None, None, sources if sources else [])
+                return results[0], results[1], results[2], gr.CheckboxGroup(choices=sources, value=sources if sources else [])
             except Exception as e:
-                return None, None, f"Error loading initial data: {str(e)}", gr.CheckboxGroup(choices=[], value=[])
+                import traceback
+                error_msg = f"Error loading initial data: {str(e)}\n{traceback.format_exc()}"
+                return None, None, error_msg, gr.CheckboxGroup(choices=[], value=[])
         
         demo.load(
             fn=initial_load,
