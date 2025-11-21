@@ -18,22 +18,45 @@ def get_parquet_urls():
     """Get actual HTTP URLs for parquet files from Hugging Face"""
     try:
         # Use HfFileSystem to get parquet file URLs
-        parquet_files = fs.glob("datasets/shachardon/ShareLM/*/train/*.parquet")
+        # Try multiple path patterns
+        parquet_files = []
+        patterns = [
+            "datasets/shachardon/ShareLM/*/train/*.parquet",
+            "datasets/shachardon/ShareLM/**/*.parquet",
+            "datasets/shachardon/ShareLM/**/train/*.parquet"
+        ]
+        
+        for pattern in patterns:
+            try:
+                files = fs.glob(pattern)
+                if files:
+                    parquet_files = files
+                    break
+            except Exception as e:
+                print(f"Error with pattern {pattern}: {e}")
+                continue
+        
         if not parquet_files:
-            # Try alternative path
-            parquet_files = fs.glob("datasets/shachardon/ShareLM/**/*.parquet")
+            raise Exception("No parquet files found with any pattern")
         
         # Convert to HTTP URLs
         urls = []
-        for file_path in parquet_files[:5]:  # Limit to first 5 files for performance
-            url = fs.url(file_path)
-            urls.append(url)
+        for file_path in parquet_files[:10]:  # Limit to first 10 files for performance
+            try:
+                url = fs.url(file_path)
+                if url and url.startswith('http'):
+                    urls.append(url)
+            except Exception as e:
+                print(f"Error converting {file_path} to URL: {e}")
+                continue
         
-        return urls
+        if urls:
+            return urls
+        else:
+            raise Exception("No valid parquet URLs found")
     except Exception as e:
         print(f"Error getting parquet URLs: {e}")
-        # Fallback: use a known parquet URL pattern
-        return [f"https://huggingface.co/datasets/shachardon/ShareLM/resolve/main/data/train-*.parquet"]
+        raise
 
 def fetch_dataset_with_duckdb(max_rows=None, min_date=None, max_date=None, selected_sources=None):
     """Fetch data from HuggingFace dataset using DuckDB with HTTP URLs"""
@@ -50,9 +73,12 @@ def fetch_dataset_with_duckdb(max_rows=None, min_date=None, max_date=None, selec
             raise Exception("No parquet files found")
         
         # Build UNION query for multiple parquet files
+        # Escape single quotes in URLs to prevent SQL injection
         table_queries = []
         for url in parquet_urls:
-            table_queries.append(f"SELECT * FROM read_parquet('{url}')")
+            # Escape single quotes by doubling them (SQL standard)
+            escaped_url = url.replace("'", "''")
+            table_queries.append(f"SELECT * FROM read_parquet('{escaped_url}')")
         
         base_query = " UNION ALL ".join(table_queries)
         
@@ -68,7 +94,9 @@ def fetch_dataset_with_duckdb(max_rows=None, min_date=None, max_date=None, selec
         
         # Add source filter if provided
         if selected_sources and len(selected_sources) > 0:
-            sources_str = "', '".join(selected_sources)
+            # Escape single quotes to prevent SQL injection
+            escaped_sources = [s.replace("'", "''") for s in selected_sources]
+            sources_str = "', '".join(escaped_sources)
             query += f" AND source IN ('{sources_str}')"
         
         # Add limit if specified
@@ -250,9 +278,12 @@ def get_available_sources(max_rows=1000):
             return []
         
         # Build UNION query for multiple parquet files
+        # Escape single quotes in URLs to prevent SQL injection
         table_queries = []
         for url in parquet_urls:
-            table_queries.append(f"SELECT DISTINCT source FROM read_parquet('{url}')")
+            # Escape single quotes by doubling them (SQL standard)
+            escaped_url = url.replace("'", "''")
+            table_queries.append(f"SELECT DISTINCT source FROM read_parquet('{escaped_url}')")
         
         base_query = " UNION ".join(table_queries)
         
@@ -325,7 +356,8 @@ def create_interface():
             # Get available sources from the data
             try:
                 available_sources = get_available_sources(min(max_rows_val, 1000))
-            except:
+            except Exception as e:
+                print(f"Error getting available sources: {e}")
                 available_sources = []
             
             # If no sources selected, use all available
@@ -338,8 +370,8 @@ def create_interface():
             # Analyze data
             results = process_data(max_rows_val, min_date_val, max_date_val, selected_sources_val)
             
-            # Return results and updated source filter
-            return results[0], results[1], results[2], gr.CheckboxGroup(choices=available_sources, value=selected_sources_val)
+            # Return results and updated source filter using gr.update()
+            return results[0], results[1], results[2], gr.update(choices=available_sources, value=selected_sources_val)
         
         btn.click(
             fn=analyze_with_source_update,
@@ -352,11 +384,11 @@ def create_interface():
             try:
                 sources = get_available_sources(1000)
                 results = process_data(1000, None, None, sources if sources else [])
-                return results[0], results[1], results[2], gr.CheckboxGroup(choices=sources, value=sources if sources else [])
+                return results[0], results[1], results[2], gr.update(choices=sources, value=sources if sources else [])
             except Exception as e:
                 import traceback
                 error_msg = f"Error loading initial data: {str(e)}\n{traceback.format_exc()}"
-                return None, None, error_msg, gr.CheckboxGroup(choices=[], value=[])
+                return None, None, error_msg, gr.update(choices=[], value=[])
         
         demo.load(
             fn=initial_load,
