@@ -5,13 +5,38 @@ from datetime import datetime, date
 import requests
 from collections import defaultdict
 import duckdb
+from huggingface_hub import HfFileSystem
 
 HF_DATASET_API = 'https://datasets-server.huggingface.co/rows'
 DATASET_NAME = 'shachardon/ShareLM'
 HF_PARQUET_PATH = "hf://datasets/shachardon/ShareLM@~parquet/**/**/*.parquet"
 
+# Initialize Hugging Face filesystem
+fs = HfFileSystem()
+
+def get_parquet_urls():
+    """Get actual HTTP URLs for parquet files from Hugging Face"""
+    try:
+        # Use HfFileSystem to get parquet file URLs
+        parquet_files = fs.glob("datasets/shachardon/ShareLM/*/train/*.parquet")
+        if not parquet_files:
+            # Try alternative path
+            parquet_files = fs.glob("datasets/shachardon/ShareLM/**/*.parquet")
+        
+        # Convert to HTTP URLs
+        urls = []
+        for file_path in parquet_files[:5]:  # Limit to first 5 files for performance
+            url = fs.url(file_path)
+            urls.append(url)
+        
+        return urls
+    except Exception as e:
+        print(f"Error getting parquet URLs: {e}")
+        # Fallback: use a known parquet URL pattern
+        return [f"https://huggingface.co/datasets/shachardon/ShareLM/resolve/main/data/train-*.parquet"]
+
 def fetch_dataset_with_duckdb(max_rows=None, min_date=None, max_date=None, selected_sources=None):
-    """Fetch data from HuggingFace dataset using DuckDB with hf:// protocol"""
+    """Fetch data from HuggingFace dataset using DuckDB with HTTP URLs"""
     try:
         con = duckdb.connect()
         
@@ -19,10 +44,22 @@ def fetch_dataset_with_duckdb(max_rows=None, min_date=None, max_date=None, selec
         con.execute("INSTALL httpfs;")
         con.execute("LOAD httpfs;")
         
+        # Get parquet file URLs
+        parquet_urls = get_parquet_urls()
+        if not parquet_urls:
+            raise Exception("No parquet files found")
+        
+        # Build UNION query for multiple parquet files
+        table_queries = []
+        for url in parquet_urls:
+            table_queries.append(f"SELECT * FROM read_parquet('{url}')")
+        
+        base_query = " UNION ALL ".join(table_queries)
+        
         # Build the query with filters
         query = f"""
         SELECT *
-        FROM '{HF_PARQUET_PATH}'
+        FROM ({base_query}) AS data
         WHERE 1=1
         """
         
@@ -188,10 +225,22 @@ def get_available_sources(max_rows=1000):
         con.execute("INSTALL httpfs;")
         con.execute("LOAD httpfs;")
         
+        # Get parquet file URLs
+        parquet_urls = get_parquet_urls()
+        if not parquet_urls:
+            return []
+        
+        # Build UNION query for multiple parquet files
+        table_queries = []
+        for url in parquet_urls:
+            table_queries.append(f"SELECT DISTINCT source FROM read_parquet('{url}')")
+        
+        base_query = " UNION ".join(table_queries)
+        
         # Query to get distinct sources
         query = f"""
         SELECT DISTINCT source
-        FROM '{HF_PARQUET_PATH}'
+        FROM ({base_query}) AS data
         ORDER BY source
         """
         
